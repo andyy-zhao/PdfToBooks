@@ -12,7 +12,9 @@ struct ContentView: View {
     @State private var pdfView: PDFView?
     /// When set, PDFReaderView will navigate to this page (0-based) and clear it.
     @State private var goToPageIndex: Int?
-    @State private var isBottomSliderHovered = false
+    /// When true, page number and slider are visible; fades out after inactivity.
+    @State private var showBottomStrip = false
+    @State private var bottomStripHideWorkItem: DispatchWorkItem?
     @State private var leftArrowHovered = false
     @State private var rightArrowHovered = false
     @State private var isTopBarHovered = false
@@ -99,23 +101,29 @@ struct ContentView: View {
                     onAnnotationAdded: { appState.saveDocument() }
                 )
                 
-                // Side hover zones: previous/next arrows pop up when hovering over left/right edges
+                // Side hover zones on top so they receive hover; previous/next arrows pop up when hovering left/right edges
                 HStack(spacing: 0) {
                     sideArrowZone(isLeft: true)
                     Spacer()
                     sideArrowZone(isLeft: false)
                 }
                 .allowsHitTesting(true)
-                
-                // Bottom strip: page indicator + slider (offset pushes it a bit lower toward window bottom)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .overlay(alignment: .bottom) {
+                // Bottom strip only in a fixed band so it doesn’t block PDF selection/highlighting
                 VStack(spacing: 0) {
-                    Spacer()
                     bottomPageIndicator
                     bottomPageSliderStrip
                 }
+                .padding(.bottom, 16)
                 .offset(y: 24)
+                .frame(height: 120)
+                .frame(maxWidth: .infinity)
+                .contentShape(Rectangle())
+                .onHover { if $0 { revealBottomStrip() } }
+                .onChange(of: currentPage) { _, _ in revealBottomStrip() }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .overlay(ScrollWheelBlockerRepresentable().allowsHitTesting(false))
@@ -305,6 +313,18 @@ struct ContentView: View {
         .padding(isLeft ? .leading : .trailing, 8)
     }
     
+    private func revealBottomStrip() {
+        bottomStripHideWorkItem?.cancel()
+        showBottomStrip = true
+        let work = DispatchWorkItem {
+            withAnimation(.easeInOut(duration: 0.35)) {
+                showBottomStrip = false
+            }
+        }
+        bottomStripHideWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5, execute: work)
+    }
+    
     private var bottomPageIndicator: some View {
         HStack {
             Spacer()
@@ -318,6 +338,8 @@ struct ContentView: View {
             Spacer()
         }
         .padding(.bottom, 16)
+        .opacity(showBottomStrip ? 1 : 0)
+        .animation(.easeInOut(duration: 0.35), value: showBottomStrip)
     }
     
     /// Full-width horizontal page bar (Apple Books style): one tick per "books page" (spread)
@@ -331,14 +353,15 @@ struct ContentView: View {
                 set: { goToPageIndex = min(max(0, $0) * 2, pageCount - 1) }
             ),
             maxPageIndex: maxBooksPageIndex,
-            isVisible: isBottomSliderHovered
+            isVisible: showBottomStrip,
+            onInteraction: { revealBottomStrip() }
         )
         .padding(.horizontal, 20)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity)
         .frame(height: 32)
         .contentShape(Rectangle())
-        .onHover { isBottomSliderHovered = $0 }
+        .onHover { if $0 { revealBottomStrip() } }
     }
 }
 
@@ -348,6 +371,7 @@ private struct AppleBooksStylePageBar: View {
     @Binding var pageIndex: Int
     let maxPageIndex: Int
     let isVisible: Bool
+    var onInteraction: (() -> Void)? = nil
     
     @State private var dragIndex: Int? = nil
     
@@ -386,10 +410,12 @@ private struct AppleBooksStylePageBar: View {
             .frame(height: thumbHeight)
             .frame(maxWidth: .infinity)
             .opacity(isVisible ? 1 : 0)
+            .animation(.easeInOut(duration: 0.35), value: isVisible)
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
+                        onInteraction?()
                         guard maxPageIndex > 0, w > 0 else { return }
                         let fraction = value.location.x / w
                         let newIndex = min(max(0, Int(round(fraction * CGFloat(maxPageIndex)))), maxPageIndex)
@@ -403,6 +429,7 @@ private struct AppleBooksStylePageBar: View {
                     }
             )
             .onTapGesture { location in
+                onInteraction?()
                 guard maxPageIndex > 0, w > 0 else { return }
                 let fraction = location.x / w
                 let newIndex = min(max(0, Int(round(fraction * CGFloat(maxPageIndex)))), maxPageIndex)

@@ -77,26 +77,10 @@ final class PDFReaderContainerView: NSView {
     }
 }
 
-// Installs an NSEvent local monitor to block all scroll wheel events in the window (so PDFView's internal scroll view never receives them)
+// Optional: can install a local monitor here if we ever need to filter scroll events.
+// Vertical and horizontal scroll are now allowed so trackpad two-finger scroll works normally.
 final class ScrollWheelBlockerView: NSView {
-    private var monitor: Any?
-    
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        if let _ = monitor { NSEvent.removeMonitor(monitor!) }
-        monitor = nil
-        guard let win = window else { return }
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak win] ev in
-            guard let w = win, ev.window === w else { return ev }
-            // Block only vertical scroll (mouse wheel); allow horizontal (two-finger swipe for next/prev page)
-            if ev.scrollingDeltaY != 0 { return nil }
-            return ev
-        }
-    }
-    
-    deinit {
-        if let m = monitor { NSEvent.removeMonitor(m) }
-    }
+    // No longer blocking vertical scroll; left empty so overlay view still exists if needed.
 }
 
 struct ScrollWheelBlockerRepresentable: NSViewRepresentable {
@@ -137,19 +121,47 @@ final class BookReaderPDFView: PDFView {
             goToPreviousPage(nil)
         case 124: // Right arrow - next spread
             goToNextPage(nil)
-        case 125, 126: // Down, Up - disabled (no vertical navigation)
-            return
+        case 125: // Down arrow - scroll down
+            scrollVertical(by: 40)
+        case 126: // Up arrow - scroll up
+            scrollVertical(by: -40)
         default:
             super.keyDown(with: event)
         }
     }
     
-    // Block only vertical scroll (mouse wheel); allow horizontal (two-finger swipe) for next/prev page
-    override func scrollWheel(with event: NSEvent) {
-        if event.scrollingDeltaY != 0 {
-            return  // Ignore vertical
+    /// Find the first NSScrollView in the PDFView's subview hierarchy (used for vertical keyboard scroll).
+    private func findScrollView() -> NSScrollView? {
+        func search(_ view: NSView) -> NSScrollView? {
+            if let scroll = view as? NSScrollView { return scroll }
+            for sub in view.subviews {
+                if let found = search(sub) { return found }
+            }
+            return nil
         }
-        super.scrollWheel(with: event)  // Allow horizontal swipe
+        return search(self)
+    }
+    
+    /// Scroll the PDF content vertically by the given amount (positive = down, negative = up).
+    /// Forwards a synthetic scroll wheel event to the internal scroll view so it handles coordinates correctly.
+    private func scrollVertical(by delta: CGFloat) {
+        guard let scrollView = findScrollView() else { return }
+        guard let window = self.window else { return }
+        let loc = window.mouseLocationOutsideOfEventStream
+        let ev = NSEvent.scrollWheel(
+            with: loc,
+            deltaX: 0,
+            deltaY: delta,
+            deltaZ: 0,
+            momentumPhase: .init(),
+            hasPreciseScrollingDeltas: true
+        )
+        scrollView.scrollWheel(with: ev)
+    }
+    
+    // Allow both vertical and horizontal scroll (trackpad two-finger scroll works normally).
+    override func scrollWheel(with event: NSEvent) {
+        super.scrollWheel(with: event)
     }
 }
 
