@@ -77,29 +77,20 @@ final class PDFReaderContainerView: NSView {
     }
 }
 
-// Optional: can install a local monitor here if we ever need to filter scroll events.
-// Vertical and horizontal scroll are now allowed so trackpad two-finger scroll works normally.
-final class ScrollWheelBlockerView: NSView {
-    // No longer blocking vertical scroll; left empty so overlay view still exists if needed.
-}
-
-struct ScrollWheelBlockerRepresentable: NSViewRepresentable {
-    func makeNSView(context: Context) -> ScrollWheelBlockerView {
-        ScrollWheelBlockerView()
-    }
-    func updateNSView(_ nsView: ScrollWheelBlockerView, context: Context) {}
-}
-
-// Custom PDFView that handles arrow key navigation, blocks vertical scrolling, and minimizes gap between pages
+// Custom PDFView that handles arrow key navigation and vertical keyboard/trackpad scroll.
 final class BookReaderPDFView: PDFView {
     override var acceptsFirstResponder: Bool { true }
+    
+    /// Cached from layout; used for vertical keyboard scroll.
+    private weak var enclosedScrollView: NSScrollView?
     
     override func layout() {
         super.layout()
         reducePageGapInSubviews()
     }
     
-    /// PDFKit clamps pageBreakMargins to ≥0, so we tweak internal subviews to reduce the gap
+    /// PDFKit clamps pageBreakMargins to ≥0, so we tweak internal subviews to reduce the gap.
+    /// Also caches the first NSScrollView for keyboard vertical scroll.
     private func reducePageGapInSubviews() {
         func recurse(_ view: NSView) {
             if let stack = view as? NSStackView {
@@ -107,11 +98,15 @@ final class BookReaderPDFView: PDFView {
             }
             if let scroll = view as? NSScrollView {
                 scroll.contentView.contentInsets = NSEdgeInsets(top: 0, left: -24, bottom: 0, right: -24)
+                if enclosedScrollView == nil {
+                    enclosedScrollView = scroll
+                }
             }
             for sub in view.subviews {
                 recurse(sub)
             }
         }
+        enclosedScrollView = nil
         recurse(self)
     }
     
@@ -130,7 +125,7 @@ final class BookReaderPDFView: PDFView {
         }
     }
     
-    /// Find the first NSScrollView in the PDFView's subview hierarchy (used for vertical keyboard scroll).
+    /// Find the first NSScrollView in the PDFView's subview hierarchy.
     private func findScrollView() -> NSScrollView? {
         func search(_ view: NSView) -> NSScrollView? {
             if let scroll = view as? NSScrollView { return scroll }
@@ -143,25 +138,38 @@ final class BookReaderPDFView: PDFView {
     }
     
     /// Scroll the PDF content vertically by the given amount (positive = down, negative = up).
-    /// Forwards a synthetic scroll wheel event to the internal scroll view so it handles coordinates correctly.
+    /// Uses the cached scroll view's contentView and adjusts bounds directly.
     private func scrollVertical(by delta: CGFloat) {
-        guard let scrollView = findScrollView() else { return }
-        guard let window = self.window else { return }
-        let loc = window.mouseLocationOutsideOfEventStream
-        let ev = NSEvent.scrollWheel(
-            with: loc,
-            deltaX: 0,
-            deltaY: delta,
-            deltaZ: 0,
-            momentumPhase: .init(),
-            hasPreciseScrollingDeltas: true
-        )
-        scrollView.scrollWheel(with: ev)
+        let scrollView = enclosedScrollView ?? findScrollView()
+        if scrollView != nil && enclosedScrollView == nil {
+            enclosedScrollView = scrollView
+        }
+        guard let scrollView = scrollView else { return }
+        let clipView = scrollView.contentView
+        guard let docView = scrollView.documentView else { return }
+        let docHeight = docView.bounds.height
+        let visibleHeight = clipView.bounds.height
+        guard visibleHeight < docHeight else { return }
+        let maxY = max(0, docHeight - visibleHeight)
+        var origin = clipView.bounds.origin
+        // Flipped: origin.y 0 = top, increase = scroll down. Non-flipped: origin.y 0 = bottom, decrease = scroll down.
+        if docView.isFlipped {
+            origin.y += delta
+        } else {
+            origin.y -= delta
+        }
+        origin.y = min(max(0, origin.y), maxY)
+        clipView.scroll(to: origin)
     }
     
-    // Allow both vertical and horizontal scroll (trackpad two-finger scroll works normally).
+    // Allow both vertical and horizontal scroll (trackpad two-finger scroll).
     override func scrollWheel(with event: NSEvent) {
         super.scrollWheel(with: event)
+    }
+    
+    /// Called from the window's arrow-key monitor so vertical scroll works even when another view is first responder.
+    func performScrollVertical(by delta: CGFloat) {
+        scrollVertical(by: delta)
     }
 }
 

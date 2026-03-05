@@ -5,11 +5,15 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject var appState: AppState
+    @FocusState private var findFieldFocused: Bool
     @State private var currentPage = 0
     @State private var showTOCPopover = false
     @State private var showHighlightsPopover = false
     @State private var showTrimMarginsPopover = false
     @State private var pdfView: PDFView?
+    @State private var findSearchText = ""
+    @State private var findResults: [PDFSelection] = []
+    @State private var findIndex = 0
     /// When set, PDFReaderView will navigate to this page (0-based) and clear it.
     @State private var goToPageIndex: Int?
     /// When true, page number and slider are visible; fades out after inactivity.
@@ -101,13 +105,12 @@ struct ContentView: View {
                     onAnnotationAdded: { appState.saveDocument() }
                 )
                 
-                // Side hover zones on top so they receive hover; previous/next arrows pop up when hovering left/right edges
+                // Side hover zones for prev/next (simple HStack to avoid SwiftUI layout recursion / stack overflow)
                 HStack(spacing: 0) {
                     sideArrowZone(isLeft: true)
-                    Spacer()
+                    Spacer(minLength: 0)
                     sideArrowZone(isLeft: false)
                 }
-                .allowsHitTesting(true)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay(alignment: .bottom) {
@@ -124,9 +127,17 @@ struct ContentView: View {
                 .onHover { if $0 { revealBottomStrip() } }
                 .onChange(of: currentPage) { _, _ in revealBottomStrip() }
             }
+            .overlay(alignment: .top) {
+                if appState.showFindBar {
+                    findBar
+                }
+            }
         }
         .background(Color(nsColor: .windowBackgroundColor))
-        .overlay(ScrollWheelBlockerRepresentable().allowsHitTesting(false))
+        .onChange(of: appState.showFindBar) { _, visible in
+            if visible { findFieldFocused = true }
+            else { clearFindHighlight() }
+        }
         .overlay(ArrowKeyMonitorRepresentable(
             onPrevious: {
                 goToPageIndex = max(0, currentPage - 2)
@@ -135,6 +146,12 @@ struct ContentView: View {
                 let pageCount = appState.document?.pageCount ?? 1
                 let lastLeft = pageCount >= 2 ? ((pageCount - 1) / 2) * 2 : 0
                 goToPageIndex = min(currentPage + 2, lastLeft)
+            },
+            onScrollUp: {
+                (pdfView as? BookReaderPDFView)?.performScrollVertical(by: -40)
+            },
+            onScrollDown: {
+                (pdfView as? BookReaderPDFView)?.performScrollVertical(by: 40)
             }
         ).allowsHitTesting(false))
         .onChange(of: currentPage) { _, newPage in
@@ -325,6 +342,80 @@ struct ContentView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5, execute: work)
     }
     
+    private var findBar: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+            TextField("Search in PDF", text: $findSearchText)
+                .textFieldStyle(.plain)
+                .focused($findFieldFocused)
+                .onSubmit { performFind() }
+            if !findResults.isEmpty {
+                Text("\(findIndex + 1) of \(findResults.count)")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                Button {
+                    findPrevious()
+                } label: {
+                    Image(systemName: "chevron.up")
+                }
+                .buttonStyle(.borderless)
+                .disabled(findResults.count <= 1)
+                Button {
+                    findNext()
+                } label: {
+                    Image(systemName: "chevron.down")
+                }
+                .buttonStyle(.borderless)
+                .disabled(findResults.count <= 1)
+            }
+            Spacer()
+            Button("Done") {
+                appState.showFindBar = false
+            }
+            .buttonStyle(.borderless)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .padding(12)
+    }
+    
+    private func performFind() {
+        guard let doc = appState.document, let view = pdfView, !findSearchText.isEmpty else { return }
+        let results = doc.findString(findSearchText, withOptions: .caseInsensitive)
+        findResults = results
+        findIndex = 0
+        view.highlightedSelections = results
+        if let first = results.first {
+            view.setCurrentSelection(first, animate: true)
+            view.scrollSelectionToVisible(nil)
+        }
+    }
+    
+    private func findNext() {
+        guard let view = pdfView, !findResults.isEmpty else { return }
+        findIndex = (findIndex + 1) % findResults.count
+        let selection = findResults[findIndex]
+        view.setCurrentSelection(selection, animate: true)
+        view.scrollSelectionToVisible(nil)
+    }
+    
+    private func findPrevious() {
+        guard let view = pdfView, !findResults.isEmpty else { return }
+        findIndex = (findIndex - 1 + findResults.count) % findResults.count
+        let selection = findResults[findIndex]
+        view.setCurrentSelection(selection, animate: true)
+        view.scrollSelectionToVisible(nil)
+    }
+    
+    private func clearFindHighlight() {
+        pdfView?.highlightedSelections = nil
+        findResults = []
+        findIndex = 0
+    }
+    
     private var bottomPageIndicator: some View {
         HStack {
             Spacer()
@@ -440,10 +531,12 @@ private struct AppleBooksStylePageBar: View {
     }
 }
 
-// MARK: - Arrow key monitor (so left/right always change page regardless of first responder)
+// MARK: - Arrow key monitor (so left/right change page, up/down scroll vertically, regardless of first responder)
 private final class ArrowKeyMonitorCoordinator {
     var onPrevious: (() -> Void)?
     var onNext: (() -> Void)?
+    var onScrollUp: (() -> Void)?
+    var onScrollDown: (() -> Void)?
 }
 
 private final class ArrowKeyMonitorView: NSView {
@@ -460,6 +553,8 @@ private final class ArrowKeyMonitorView: NSView {
             switch ev.keyCode {
             case 123: coord?.onPrevious?(); return nil
             case 124: coord?.onNext?(); return nil
+            case 125: coord?.onScrollDown?(); return nil
+            case 126: coord?.onScrollUp?(); return nil
             default: return ev
             }
         }
@@ -473,11 +568,15 @@ private final class ArrowKeyMonitorView: NSView {
 private struct ArrowKeyMonitorRepresentable: NSViewRepresentable {
     var onPrevious: () -> Void
     var onNext: () -> Void
+    var onScrollUp: () -> Void
+    var onScrollDown: () -> Void
     
     func makeCoordinator() -> ArrowKeyMonitorCoordinator {
         let c = ArrowKeyMonitorCoordinator()
         c.onPrevious = onPrevious
         c.onNext = onNext
+        c.onScrollUp = onScrollUp
+        c.onScrollDown = onScrollDown
         return c
     }
     
@@ -490,6 +589,8 @@ private struct ArrowKeyMonitorRepresentable: NSViewRepresentable {
     func updateNSView(_ nsView: ArrowKeyMonitorView, context: Context) {
         context.coordinator.onPrevious = onPrevious
         context.coordinator.onNext = onNext
+        context.coordinator.onScrollUp = onScrollUp
+        context.coordinator.onScrollDown = onScrollDown
     }
 }
 

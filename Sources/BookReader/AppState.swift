@@ -17,6 +17,7 @@ class AppState: ObservableObject {
     @Published var document: PDFDocument?
     @Published var documentURL: URL?
     @Published var showOpenPanel = false
+    @Published var showFindBar = false
     @Published var showTableOfContents = false
     @Published var recentDocuments: [URL] = []
     @Published var libraryDocuments: [URL] = []

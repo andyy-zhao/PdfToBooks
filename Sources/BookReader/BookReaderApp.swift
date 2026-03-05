@@ -13,6 +13,13 @@ struct BookReaderApp: App {
         .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(replacing: .newItem) {}
+            CommandMenu("Edit") {
+                Button("Find...") {
+                    appState.showFindBar = true
+                }
+                .keyboardShortcut("f", modifiers: .command)
+                .disabled(appState.document == nil)
+            }
             CommandMenu("File") {
                 Button("Open PDF...") {
                     appState.showOpenPanel = true

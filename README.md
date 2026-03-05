@@ -71,6 +71,7 @@ swift run BookReader
 | Shortcut | Action |
 |----------|--------|
 | Cmd+O | Open PDF |
+| Cmd+F | Find in document |
 | Cmd+S | Save |
 | Cmd+W | Close document |
 
